@@ -64,6 +64,13 @@ trait SchedulerConfiguration extends ScallopConf {
   lazy val mailSslOn = opt[Boolean]("mail_ssl",
     descr = "Mail SSL",
     default = Some(false))
+  lazy val mailTemplatePath = opt[String]("mail_template_path",
+    descr = "Path to a Mustache template file (optional)",
+    default = None)
+  lazy val mailAsHtml = opt[Boolean]("mail_as_html",
+    descr = "Send e-mail notifications as HTML",
+    default = Some(false)
+  )
   lazy val ravenDsn = opt[String]("raven_dsn",
     descr = "Raven DSN for connecting to a raven or sentry event service",
     default = None)

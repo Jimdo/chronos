@@ -8,6 +8,7 @@ import javax.inject.Named
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.util.Timeout
 import com.codahale.metrics.MetricRegistry
+import org.apache.commons.mail.{SimpleEmail, HtmlEmail}
 import com.google.common.util.concurrent.{ListeningScheduledExecutorService, MoreExecutors, ThreadFactoryBuilder}
 import com.google.inject.{AbstractModule, Inject, Provides, Singleton}
 import mesosphere.chaos.http.HttpConf
@@ -104,7 +105,13 @@ class MainModule(val config: SchedulerConfiguration with HttpConf)
         server <- config.mailServer.get if !server.isEmpty && server.contains(":")
         from <- config.mailFrom.get if !from.isEmpty
       } yield {
-        create(classOf[MailClient], server, from, config.mailUser.get, config.mailPassword.get, config.mailSslOn())
+        val mailFactory = if (config.mailAsHtml()) {
+          () => { new HtmlEmail }
+        } else {
+          () => { new SimpleEmail }
+        }
+
+        create(classOf[MailClient], server, from, config.mailUser.get, config.mailPassword.get, config.mailSslOn(), config.mailTemplatePath.get, mailFactory)
       },
       for {
         ravenDsn <- config.ravenDsn.get if !ravenDsn.isEmpty
