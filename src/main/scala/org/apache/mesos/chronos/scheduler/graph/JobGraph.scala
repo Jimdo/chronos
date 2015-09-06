@@ -151,18 +151,25 @@ class JobGraph {
         val edgesToChild = getEdgesToParents(child)
         if (edgesToChild.size == 1) {
           results += child
-        }
-        else {
-          val currentEdge = dag.getEdge(vertex, child)
-          if (!edgeInvocationCount.contains(currentEdge)) {
-            edgeInvocationCount.put(currentEdge, 1L)
-          } else {
-            edgeInvocationCount.put(currentEdge, edgeInvocationCount.get(currentEdge).get + 1)
+        } else {
+          val hasFailedParent = edgesToChild.exists({ e =>
+            val parent = dag.getEdgeSource(e)
+            val parentJob = jobNameMapping.get(parent).get
+            parentJob.errorsSinceLastSuccess != 0 && !parentJob.softError
+          })
+
+          if (!hasFailedParent) {
+            val currentEdge = dag.getEdge(vertex, child)
+            if (!edgeInvocationCount.contains(currentEdge)) {
+              edgeInvocationCount.put(currentEdge, 1L)
+            } else {
+              edgeInvocationCount.put(currentEdge, edgeInvocationCount.get(currentEdge).get + 1)
+            }
+            val count = edgeInvocationCount.get(currentEdge).get
+            val min = edgesToChild.map(edgeInvocationCount.getOrElse(_, 0L)).min
+            if (count == min)
+              results += child
           }
-          val count = edgeInvocationCount.get(currentEdge).get
-          val min = edgesToChild.map(edgeInvocationCount.getOrElse(_, 0L)).min
-          if (count == min)
-            results += child
         }
       }
     }

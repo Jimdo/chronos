@@ -508,5 +508,131 @@ class JobSchedulerIntegrationTest extends SpecificationWithJUnit with Mockito {
       graph.lookupVertex("job5").get.successCount must_== 2
       graph.lookupVertex("job5").get.errorCount must_== 0
     }
+
+    "Tests that dependent jobs are executed in the right order after one job has failed and recovered" in {
+      val epsilon = Minutes.minutes(20).toPeriod
+      val date = DateTime.now(DateTimeZone.UTC)
+      val fmt = ISODateTimeFormat.dateTime()
+      val parent = new ScheduleBasedJob(schedule = s"R/${fmt.print(date)}/PT1M",
+        name = "parent", command = "fooo", epsilon = epsilon, disabled = false)
+
+      val child1 = new DependencyBasedJob(Set("parent"), name = "child1", command = "CMD", disabled = false, retries = 0)
+      val child2 = new DependencyBasedJob(Set("parent"), name = "child2", command = "CMD", disabled = false, retries = 0)
+      val end = new DependencyBasedJob(Set("child1", "child2"), name = "end", command = "CMD", disabled = false, retries = 0)
+
+      val horizon = Minutes.minutes(5).toPeriod
+      val mockTaskManager = mock[TaskManager]
+      val graph = new JobGraph()
+      val mockPersistenceStore = mock[PersistenceStore]
+      val scheduler = mockScheduler(horizon, mockTaskManager, graph, mockPersistenceStore)
+      scheduler.leader.set(true)
+      scheduler.registerJob(parent, persist = true, date)
+      scheduler.registerJob(child1, persist = true, date)
+      scheduler.registerJob(child2, persist = true, date)
+      scheduler.registerJob(end, persist = true, date)
+
+      // The first run of the pipeline. It passes without errors.
+      scheduler.run(() => {
+        date
+      })
+
+      val finishedDate = date.plus(1)
+
+      val parentRun1 = TaskUtils.getTaskStatus(parent, date, 0)
+      scheduler.handleStartedTask(parentRun1)
+      scheduler.handleFinishedTask(parentRun1, Some(finishedDate))
+
+      graph.lookupVertex("parent").get.successCount must_== 1
+      graph.lookupVertex("parent").get.errorCount must_== 0
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(child1, finishedDate, 0), highPriority = false)
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(child2, finishedDate, 0), highPriority = false)
+
+      val child2Run1 = TaskUtils.getTaskStatus(child2, finishedDate, 0)
+      scheduler.handleStartedTask(child2Run1)
+      scheduler.handleFinishedTask(child2Run1, Some(finishedDate))
+
+      graph.lookupVertex("child2").get.successCount must_== 1
+      graph.lookupVertex("child2").get.errorCount must_== 0
+      there was no(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      val child1Run1 = TaskUtils.getTaskStatus(child1, finishedDate, 0)
+      scheduler.handleStartedTask(child1Run1)
+      scheduler.handleFinishedTask(child1Run1, Some(finishedDate))
+
+      graph.lookupVertex("child1").get.successCount must_== 1
+      graph.lookupVertex("child1").get.errorCount must_== 0
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      val endRun1 = TaskUtils.getTaskStatus(end, finishedDate, 0)
+      scheduler.handleStartedTask(endRun1)
+      scheduler.handleFinishedTask(endRun1, Some(finishedDate))
+
+      graph.lookupVertex("end").get.successCount must_== 1
+      graph.lookupVertex("end").get.errorCount must_== 0
+
+      // Second run of the pipeline. "child2" fails.
+      scheduler.run(() => {
+        date
+      })
+
+      val parentRun2 = TaskUtils.getTaskStatus(parent, date, 0)
+      scheduler.handleStartedTask(parentRun2)
+      scheduler.handleFinishedTask(parentRun2, Some(finishedDate))
+
+      graph.lookupVertex("parent").get.successCount must_== 2
+      graph.lookupVertex("parent").get.errorCount must_== 0
+
+      there was two(mockTaskManager).enqueue(TaskUtils.getTaskId(child1, finishedDate, 0), highPriority = false)
+      there was two(mockTaskManager).enqueue(TaskUtils.getTaskId(child2, finishedDate, 0), highPriority = false)
+
+      val child2Run2 = TaskUtils.getTaskStatus(child2, finishedDate, 0)
+      scheduler.handleStartedTask(child2Run2)
+      scheduler.handleFailedTask(child2Run2)
+
+      graph.lookupVertex("child2").get.successCount must_== 1
+      graph.lookupVertex("child2").get.errorCount must_== 1
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      val child1Run2 = TaskUtils.getTaskStatus(child1, finishedDate, 0)
+      scheduler.handleStartedTask(child1Run2)
+      scheduler.handleFinishedTask(child1Run2, Some(finishedDate))
+
+      graph.lookupVertex("child1").get.successCount must_== 2
+      graph.lookupVertex("child1").get.errorCount must_== 0
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      // Third run of the pipeline. Job "end" should only be scheduled after both "child1" and "child2" have finished.
+      scheduler.run(() => {
+        date
+      })
+
+      val parentRun3 = TaskUtils.getTaskStatus(parent, date, 0)
+      scheduler.handleStartedTask(parentRun3)
+      scheduler.handleFinishedTask(parentRun3, Some(finishedDate))
+
+      graph.lookupVertex("parent").get.successCount must_== 3
+      graph.lookupVertex("parent").get.errorCount must_== 0
+
+      there was three(mockTaskManager).enqueue(TaskUtils.getTaskId(child1, finishedDate, 0), highPriority = false)
+      there was three(mockTaskManager).enqueue(TaskUtils.getTaskId(child2, finishedDate, 0), highPriority = false)
+
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      val child2Run3 = TaskUtils.getTaskStatus(child2, finishedDate, 0)
+      scheduler.handleStartedTask(child2Run3)
+      scheduler.handleFinishedTask(child2Run3, Some(finishedDate))
+      there was one(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+
+      graph.lookupVertex("child2").get.successCount must_== 2
+      graph.lookupVertex("child2").get.errorCount must_== 1
+
+      val child1Run3 = TaskUtils.getTaskStatus(child1, finishedDate, 0)
+      scheduler.handleStartedTask(child1Run3)
+      scheduler.handleFinishedTask(child1Run3, Some(finishedDate))
+
+      graph.lookupVertex("child1").get.successCount must_== 3
+      graph.lookupVertex("child1").get.errorCount must_== 0
+      there was two(mockTaskManager).enqueue(TaskUtils.getTaskId(end, finishedDate, 0), highPriority = false)
+    }
   }
 }
